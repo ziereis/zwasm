@@ -44,8 +44,8 @@ const BinaryReader = struct {
 
     fn readIntLeb(self: *Self, comptime T: type) ReaderError!T {
         comptime assert(@typeInfo(T) == .Int or @typeInfo(T) == .ComptimeInt);
-        const shift: u32 = 0;
-        const result: u64 = 0;
+        var shift: u6 = 0;
+        var result: u64 = 0;
         while (true) {
             assert(shift < @sizeOf(T) * 8);
             const byte = self.data[self.pos];
@@ -57,6 +57,10 @@ const BinaryReader = struct {
             }
         }
         return @as(T, @intCast(result));
+    }
+
+    fn hasMore(self: *Self) bool {
+        return self.pos < self.data.len;
     }
 };
 
@@ -80,14 +84,77 @@ const WasmSectionId = enum(u8) {
     EnumSize,
 };
 
+const WasmValueType = enum(u8) {
+    I32 = 0x7F,
+    I64 = 0x7E,
+    F32 = 0x7D,
+    F64 = 0x7C,
+};
+
+const WasmFunctionType = struct {
+    retType: WasmValueType,
+    argTypes: []WasmValueType,
+    const Self = @This();
+
+    pub fn parse(self: *Self, alloc: std.mem.Allocator, reader: *BinaryReader) !void {
+        const fnMagic = try reader.read(u8);
+        try wasmValidateEq(fnMagic, 0x60);
+        const numArgs = try reader.readIntLeb(u32);
+        self.argTypes = try alloc.alloc(WasmValueType, numArgs);
+        for (self.argTypes) |*arg| {
+            arg.* = @enumFromInt(try reader.read(u8));
+        }
+        const numRetTypes = try reader.readIntLeb(u32);
+        try wasmValidateEq(numRetTypes, 1);
+        self.retType = @enumFromInt(try reader.read(u8));
+    }
+
+    pub fn dump(self: Self) void {
+        print("Fn Signature: (", .{});
+
+        // Print arguments
+        var first = true;
+        for (self.argTypes) |*arg| {
+            if (!first) {
+                print(", ");
+            }
+            print("{}", arg.str());
+            first = false;
+        }
+
+        // Print return type
+        print(") -> {}", self.retType.str());
+    }
+};
+
+const WasmTypeSection = struct {};
+
 const WasmModule = struct {
     allocator: std.mem.Allocator,
+    typeSection: WasmFunctionType = undefined,
     const Self = @This();
 
     pub fn run(self: *Self, wasmCode: []const u8) !void {
         var reader = BinaryReader{ .data = wasmCode };
         const magic = try reader.read(u32);
         try wasmValidateEq(magic, 0x6d736100);
+        const version = try reader.read(u32);
+        try wasmValidateEq(version, 1);
+        while (reader.hasMore()) {
+            const sectionId: WasmSectionId = @enumFromInt(try reader.read(u8));
+            try wasmValidateLt(@intFromEnum(sectionId), @intFromEnum(WasmSectionId.EnumSize));
+            print("{}\n", .{sectionId});
+
+            switch (sectionId) {
+                WasmSectionId.typeSection => {
+                    try self.typeSection.parse(self.allocator, &reader);
+                    self.typeSection.dump();
+                },
+                else => break,
+            }
+
+            break;
+        }
     }
 };
 
@@ -98,9 +165,16 @@ pub fn wasmValidateEq(actual: anytype, expected: anytype) WasmError!void {
     }
 }
 
+pub fn wasmValidateLt(actual: anytype, expected: anytype) WasmError!void {
+    if (actual >= expected) {
+        print("Validation failed, expected:{}, actual:{}\n", .{ expected, actual });
+        return WasmError.verificationValid;
+    }
+}
+
 pub fn main() !void {
     const file = try MmappedFile.open("wasm_adder.wasm");
-    const wasm = WasmModule{ .allocator = std.heap.page_allocator };
-    wasm.run(file.mem);
+    var wasm = WasmModule{ .allocator = std.heap.page_allocator };
+    try wasm.run(file.mem);
     defer file.deinit();
 }
