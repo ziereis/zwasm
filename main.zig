@@ -27,6 +27,20 @@ const ReaderError = error{
     outOfMemoryError,
 };
 
+fn MakeUnsigned(comptime T: type) type {
+    return @Type(.{ .Int = .{
+        .bits = @typeInfo(T).Int.bits,
+        .signedness = .unsigned,
+    } });
+}
+
+fn GetSaveShiftType(comptime T: type) type {
+    return @Type(.{ .Int = .{
+        .bits = @sizeOf(T) * 8 - 1 - @clz(@as(T, @typeInfo(T).Int.bits)),
+        .signedness = .unsigned,
+    } });
+}
+
 const BinaryReader = struct {
     data: []const u8,
     pos: u32 = 0,
@@ -43,19 +57,28 @@ const BinaryReader = struct {
 
     fn readIntLeb(self: *Self, comptime T: type) ReaderError!T {
         comptime assert(@typeInfo(T) == .Int or @typeInfo(T) == .ComptimeInt);
-        var shift: u6 = 0;
-        var result: u64 = 0;
+        const U = MakeUnsigned(T);
+        var shift: GetSaveShiftType(T) = 0;
+        var result: U = 0;
         while (true) {
             assert(shift < @sizeOf(T) * 8);
             const byte = self.data[self.pos];
-            result |= @as(u64, @intCast(byte & 0x7f)) << shift;
+            result |= @as(U, @intCast(byte & 0x7f)) << shift;
             shift += 7;
             self.pos += 1;
             if ((byte & 0x80) == 0) {
+                if (comptime @typeInfo(T).Int.signedness == .signed) {
+                    const cond = (byte & 0x40 != 0) and (shift < @sizeOf(T) * 8);
+                    if (cond) {
+                        var ones: U = 0;
+                        ones = ~ones;
+                        result |= ones << shift;
+                    }
+                }
                 break;
             }
         }
-        return @as(T, @intCast(result));
+        return @as(T, @bitCast(result));
     }
 
     fn readStr(self: *Self) ReaderError![]const u8 {
@@ -228,6 +251,10 @@ const WasmOpCode = enum(u8) {
     localTee = 0x22,
     i32Add = 0x6A,
     i32Const = 0x41,
+
+    pub fn parse(reader: *BinaryReader) !WasmOpCode {
+        return @enumFromInt(try reader.read(u8));
+    }
 };
 
 const WasmValue = union(WasmValueType) {
@@ -244,23 +271,55 @@ const WasmInstruction = struct {
 };
 
 const OperandStack = struct {
-    stack: []u8,
+    stack: []ValentIR,
     top: u32 = 0,
     const Self = @This();
 
-    pub fn push(self: *Self, value: WasmValue) void {
+    pub fn push(self: *Self, value: ValentIR) void {
         wasmValidateLt(self.top, self.data.len);
         self.stack[self.top] = value;
     }
 
-    pub fn pop(self: *Self, valType: WasmValueType) ?WasmValue {
-        wasmV
-        wasmValidateEq(valType, self.stack[self.top]);
-        return W
+    pub fn pop(self: *Self) ?ValentIR {
+        if (self.top == 0) {
+            return null;
+        }
+
+        defer self.top -= 1;
+        return self.stack[self.top];
     }
 };
 
-const WasmIR = struct {};
+const IRTag = enum(u8) {
+    i32const,
+    setLocal,
+    getLocal,
+    i32add,
+};
+
+const ValentOp = union(enum) {
+    stackLocation: u32,
+    gpr: x86Register,
+    i32Const: u32,
+};
+
+const ValentIR = struct {
+    opcode: IRTag,
+    op1: ValentOp,
+    op2: ValentOp,
+};
+
+const x86Register = struct {
+    idx: u32,
+};
+
+const RegisterManager = struct {
+    freeReg: x86Register = 0,
+    pub fn getReg(self: *RegisterManager) x86Register {
+        defer self.freeReg += 1;
+        return self.freeReg;
+    }
+};
 
 pub fn readCompressedLocals(
     localsList: *std.ArrayList(WasmValueType),
@@ -286,7 +345,8 @@ const WasmModule = struct {
     pub fn genIR(
         _: *Self,
         reader: *BinaryReader,
-    ) !WasmIR {
+    ) !ValentIR {
+        var regManager = RegisterManager{};
         var tempAlloc = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer tempAlloc.deinit();
 
@@ -294,6 +354,8 @@ const WasmModule = struct {
         var localTypes = std.ArrayList(WasmValueType).init(std.heap.page_allocator);
 
         print("Num imported fns: {}\n", .{numFuncs});
+
+        var virtualStack = OperandStack{ .stack = tempAlloc.alloc(WasmValue, 10000) };
 
         var curFn: u32 = 0;
         while (curFn < numFuncs) : (curFn += 1) {
@@ -306,7 +368,22 @@ const WasmModule = struct {
             print("\n", .{});
 
             while (true) {
-                break;
+                const opcode = try WasmOpCode.parse(reader);
+
+                switch (opcode) {
+                    WasmOpCode.i32Const => {
+                        const imm = try reader.readIntLeb(i32);
+                        virtualStack.push(ValentIR{ .opcode = ValentOp.i32Const });
+                        print("const: {}\n", .{imm});
+                    },
+                    WasmOpCode.localSet => {
+                        const localIdx = try reader.readIntLeb(u32);
+                        const reg = regManager.getReg();
+                        break;
+                    },
+                    else => break,
+                }
+                print("Op: {}\n", .{opcode});
             }
         }
         return WasmIR{};
