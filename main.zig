@@ -97,6 +97,10 @@ const WasmValueType = enum(u8) {
     I64 = 0x7E,
     F32 = 0x7D,
     F64 = 0x7C,
+
+    pub fn parse(reader: *BinaryReader) !WasmValueType {
+        return @enumFromInt(try reader.read(u8));
+    }
 };
 
 const WasmFunctionType = struct {
@@ -110,11 +114,11 @@ const WasmFunctionType = struct {
         const numArgs = try reader.readIntLeb(u32);
         self.argTypes = try alloc.alloc(WasmValueType, numArgs);
         for (self.argTypes) |*arg| {
-            arg.* = @enumFromInt(try reader.read(u8));
+            arg.* = try WasmValueType.parse(reader);
         }
         const numRetTypes = try reader.readIntLeb(u32);
         try wasmValidateEq(numRetTypes, 1);
-        self.retType = @enumFromInt(try reader.read(u8));
+        self.retType = try WasmValueType.parse(reader);
     }
 
     pub fn dump(self: Self) void {
@@ -216,11 +220,51 @@ const WasmExportSection = struct {
     }
 };
 
+const WasmOpCode = enum(u8) {
+    wasmUnreachable = 0x00,
+    wasmNop = 0x01,
+    localGet = 0x20,
+    localSet = 0x21,
+    localTee = 0x22,
+    i32Add = 0x6A,
+    i32Const = 0x41,
+};
+
+const WasmValue = union(WasmValueType) {
+    I32: i32,
+    I64: i64,
+    F32: f32,
+    F64: f64,
+};
+
+const WasmInstruction = struct {
+    opcode: WasmOpCode,
+    op1: WasmValue,
+    op2: WasmValue,
+};
+
+fn OperandStack(
+    comptime size: comptime_int,
+) type {
+    return struct {
+        stack: [size]WasmValue,
+    };
+}
+
 const WasmIR = struct {};
 
-const CodeGen = struct {
-    pub fn genIR() !WasmIR {}
-};
+pub fn readCompressedLocals(
+    localsList: *std.ArrayList(WasmValueType),
+    reader: *BinaryReader,
+) !void {
+    const compressedLocalVecLen = try reader.readIntLeb(u32);
+    var idx: u32 = 0;
+    while (idx < compressedLocalVecLen) : (idx += 1) {
+        const runLength = try reader.readIntLeb(u32);
+        const localType = try WasmValueType.parse(reader);
+        try localsList.appendNTimes(localType, runLength);
+    }
+}
 
 const WasmModule = struct {
     allocator: std.mem.Allocator,
@@ -229,6 +273,36 @@ const WasmModule = struct {
     exportSection: WasmExportSection = undefined,
 
     const Self = @This();
+
+    pub fn genIR(
+        _: *Self,
+        reader: *BinaryReader,
+    ) !WasmIR {
+        var tempAlloc = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer tempAlloc.deinit();
+
+        const numFuncs = try reader.readIntLeb(u32);
+        var localTypes = std.ArrayList(WasmValueType).init(std.heap.page_allocator);
+
+        print("Num imported fns: {}\n", .{numFuncs});
+
+        var curFn: u32 = 0;
+        while (curFn < numFuncs) : (curFn += 1) {
+            const fnSize = try reader.readIntLeb(u32);
+            print("Fn {} -> size: {}\n", .{ curFn, fnSize });
+            try readCompressedLocals(&localTypes, reader);
+            for (localTypes.items) |ty| {
+                print("ty: {}", .{ty});
+            }
+            print("\n", .{});
+
+            while (true) {
+                break;
+            }
+        }
+        return WasmIR{};
+        // TODO: handle imported function here
+    }
 
     pub fn run(self: *Self, wasmCode: []const u8) !void {
         var reader = BinaryReader{ .data = wasmCode };
@@ -259,6 +333,9 @@ const WasmModule = struct {
                 WasmSectionId.exportSection => {
                     try self.exportSection.parseSection(self.allocator, &reader);
                     self.exportSection.dump();
+                },
+                WasmSectionId.CodeSection => {
+                    _ = try self.genIR(&reader);
                 },
                 else => break,
             }
