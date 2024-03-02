@@ -243,13 +243,22 @@ const WasmInstruction = struct {
     op2: WasmValue,
 };
 
-fn OperandStack(
-    comptime size: comptime_int,
-) type {
-    return struct {
-        stack: [size]WasmValue,
-    };
-}
+const OperandStack = struct {
+    stack: []u8,
+    top: u32 = 0,
+    const Self = @This();
+
+    pub fn push(self: *Self, value: WasmValue) void {
+        wasmValidateLt(self.top, self.data.len);
+        self.stack[self.top] = value;
+    }
+
+    pub fn pop(self: *Self, valType: WasmValueType) ?WasmValue {
+        wasmV
+        wasmValidateEq(valType, self.stack[self.top]);
+        return W
+    }
+};
 
 const WasmIR = struct {};
 
@@ -342,6 +351,13 @@ const WasmModule = struct {
         }
     }
 };
+
+pub fn wasmValidateNeq(actual: anytype, expected: anytype) WasmError!void {
+    if (actual != expected) {
+        print("Validation failed, expected:{}, actual:{}\n", .{ expected, actual });
+        return WasmError.verificationValid;
+    }
+}
 
 pub fn wasmValidateEq(actual: anytype, expected: anytype) WasmError!void {
     if (actual != expected) {
