@@ -290,7 +290,7 @@ const OperandStack = struct {
     }
 };
 
-const IRTag = enum(u8) {
+const ValentOpcode = enum(u8) {
     i32const,
     setLocal,
     getLocal,
@@ -304,7 +304,7 @@ const ValentOp = union(enum) {
 };
 
 const ValentIR = struct {
-    opcode: IRTag,
+    opcode: ValentOpcode,
     op1: ValentOp,
     op2: ValentOp,
 };
@@ -315,9 +315,38 @@ const x86Register = struct {
 
 const RegisterManager = struct {
     freeReg: x86Register = 0,
+
     pub fn getReg(self: *RegisterManager) x86Register {
         defer self.freeReg += 1;
         return self.freeReg;
+    }
+};
+
+const x86Opcode = enum {
+    loadConst,
+    sadd,
+    add,
+    mov,
+    ret,
+};
+
+const x86Operator = union {
+    imm: u32,
+    reg: x86Register,
+};
+
+const x86MIR = struct {
+    opcode: x86Opcode,
+    op1: x86Operator,
+    op2: x86Operator,
+};
+
+const x86Module = struct {
+    allocator: std.mem.Allocator,
+    code: std.ArrayList(x86MIR),
+
+    pub fn append(inst: x86MIR) void {
+        code.append(inst);
     }
 };
 
@@ -333,6 +362,43 @@ pub fn readCompressedLocals(
         try localsList.appendNTimes(localType, runLength);
     }
 }
+
+const StorageLocation = union(enum) {
+    reg: x86Register,
+};
+
+const VBCodeGen = struct {
+    virtStack: OperandStack,
+    regDescriptor: std.AutoArrayHashMap(x86Register, u32),
+    localDescriptor: std.AutoArrayHashMap(u32, x86Register),
+    regManager: RegisterManager,
+    mod: x86Module,
+
+    const Self = @This();
+
+    pub fn produce(self: *Self) !x86Register {
+        const top = try self.virtStack.pop();
+        switch (top.opcode) {
+            ValentIR.i32Const => {
+                const reg = RegisterManager.getReg();
+                x86Module.append(x86MIR{.opcode = x86Opcode.mov, op1 = x86Operator{.imm = top.op1.i32Const},
+                op2 = )
+            },
+        }
+    }
+
+    pub fn handleWasmInst(self: *Self, inst: WasmInstruction) !void {
+        switch (inst.opcode) {
+            WasmOpCode.i32Const => {
+                self.virtStack.push(ValentIR{
+                    .opcode = ValentOp.i32Const,
+                    .op1 = inst.op1.I32,
+                });
+            },
+            WasmOpCode.localSet => {},
+        }
+    }
+};
 
 const WasmModule = struct {
     allocator: std.mem.Allocator,
@@ -355,7 +421,9 @@ const WasmModule = struct {
 
         print("Num imported fns: {}\n", .{numFuncs});
 
-        var virtualStack = OperandStack{ .stack = tempAlloc.alloc(WasmValue, 10000) };
+        const mod = x86Module{ .alloc = std.heap.ArenaAllocator.ini(std.heap.page_allocator), .code = std.ArrayList(x86MIR).init(.alloc) };
+
+        var virtualStack = OperandStack{ .stack = tempAlloc.alloc(ValentIR, 10000) };
 
         var curFn: u32 = 0;
         while (curFn < numFuncs) : (curFn += 1) {
@@ -379,6 +447,7 @@ const WasmModule = struct {
                     WasmOpCode.localSet => {
                         const localIdx = try reader.readIntLeb(u32);
                         const reg = regManager.getReg();
+
                         break;
                     },
                     else => break,
